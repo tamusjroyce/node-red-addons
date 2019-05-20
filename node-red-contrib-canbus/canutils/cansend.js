@@ -19,84 +19,95 @@ module.exports = function(RED) {
     "use strict";
     var can = require('socketcan');
     var random = require('random-js')();	//uses native engine
-    function CanSendNode(n) {
-        RED.nodes.createNode(this,n);
 
-	this.config = RED.nodes.getNode(n.config);
-	if(this.config)
-	        this.channel = this.config.channel;
-	else
-		this.channel = "vcan0";
-	this.canid=n.canid;
-	this.payload=n.payload;
+	function processMessage(msg) {
+		if (typeof(msg.channel) === 'undefined') {
+			msg.channel = this.channel;
+		}
+
+		var frame   = {};
+		var payload = msg.data || msg.payload || this.payload;
+		// Either the message, the message payload, or the payload from node-red configuration can now hold canid and can data.
+		//   If data comes in as an array, it now gets converted appropriately to a buffer.
+		if(typeof(payload) !== 'undefined' && payload.indexOf("#") !== -1) {
+			frame.canid = parseInt(msg.payload.split("#")[0]);
+			frame.data  = new Buffer(msg.payload.split("#")[1]);
+		} else if (Array.isArray(payload)) {
+			frame.canid = msg.canid || this.canid || 0;
+			frame.data  = new Buffer(payload);
+		} else if (typeof(payload) === 'string' && payload.startsWith('[')) {
+			frame.canid = msg.canid || this.canid || 0;
+			frame.data  = new Buffer(JSON.parse(payload));
+		} else if (typeof(payload) !== 'undefined') {
+			frame.canid = parseInt(msg.canid || (payload || {}).canid || (this.payload || {}).canid || this.canid || 0);
+			if (Array.isArray(payload.data)) {
+				frame.data = Buffer.from(payload.data);
+			} else if (typeof(payload.data) === 'string' && payload.data.startsWith("[")) {
+				frame.data = Buffer.from(JSON.parse(payload.data));
+			} else if (typeof(payload.data) === 'Buffer') {
+				frame.data = Buffer.payload;
+			} else {
+				node.error("Can data missing or not defined in a format that could be processed!");
+			}
+		} else {
+			node.error("Can data missing or not defined in a format that could be processed!");
+		}
+		frame.dlc = frame.data.length;
+
+		if(frame.canid === 0)   //canid is not yet set
+		{
+			frame.canid = random.integer(1, 4095);
+		}
+		node.warn("canid: " + frame.canid + ", data: " + frame.data + ", dlc: " + frame.dlc);
+
+		if (frame.dlc <= 8)	{
+			canChannel.send({
+				id:   frame.canid,
+				ext:  false,
+				data: frame.data
+			});
+		} else {
+			node.warn("frame data is too long");
+		}
+	}
+
+	function CanSendNode(n) {
+        RED.nodes.createNode(this, n);
+
+		this.config = RED.nodes.getNode(n.config);
+		if (typeof(n.channel) !== 'undefined') {
+			this.channel = n.channel.toString();
+		} else if (typeof(this.config) !== 'undefined') {
+			this.channel = this.config.channel.toString();
+		} else {
+			this.channel = "vcan0";
+		}
+
+		this.canid   = n.canid;
+		this.payload = n.payload;
 
         var node = this;
+		node.warn("id=" + this.canid + ", channel=" + this.channel);
 
-	node.warn("id="+this.canid+",channel="+this.channel);
-	try {
-		var channel = can.createRawChannel(""+this.channel, true);
-	}catch(ex) {
-		node.error("channel not found:"+this.channel);
+		try {
+			var canChannel = can.createRawChannel(this.channel, true);
+		}catch(ex) {
+			node.error("channel not found:" + this.channel);
+		}
+
+		if(typeof(canChannel) !== 'undefined')
+		{
+			canChannel.start();
+
+			// respond to inputs....
+			this.on('input', processMessage);
+
+			//TODO: Support for extended frames, other cansend options
+			this.on("close", function() {
+				canChannel.stop();
+			});
+		}
 	}
-	if(channel)
-	{
-		channel.start();
-		var frame={};
-	        // respond to inputs....
-        	this.on('input', function (msg) {
-			msg.channel=this.channel;
-			frame.canid=0;
-			frame.dlc=0;
-			if(msg.canid)
-			{
-				frame.canid=parseInt(msg.canid);
-			}
-			else if(this.canid)
-			{
-				frame.canid=parseInt(this.canid);
-			}	
-			/*--------------------------------------------------------*/
-			if(msg.payload && msg.payload.indexOf("#")!=-1 && frame.canid==0)
-			{
-				frame.canid=parseInt(msg.payload.split("#")[0]);
-				frame.data=new Buffer(msg.payload.split("#")[1]);
-				frame.dlc=frame.data.length;
-			}
-			else if(msg.payload) 
-			{
-				frame.data=new Buffer(msg.payload);
-				frame.dlc=frame.data.length;
-			}
-			else if(this.payload)
-			{
-				frame.data=new Buffer(this.payload);
-				frame.dlc=frame.data.length;
-			}
-			else	 //no msg.payload and this.data is empty
-			{
-				frame.dlc=random.integer(1,8);
-				frame.data=new Buffer(frame.dlc);
-				for(var i=0;i<frame.dlc;i++)
-					frame.data[i]=random.integer(65,90);
-			//random.integer(1,255),random.integer(48,57),random.integer(96,121)
-			}
-			if(frame.canid==0)   //canid is not yet set
-			{
-				frame.canid=random.integer(1,4095);
-			}
-			node.warn("canid:"+frame.canid+",data:"+frame.data+",dlc:"+frame.dlc);
-			if(frame.dlc<=8)	//try-catch?
-				channel.send({ id: frame.canid,
-					ext: false,
-					data:frame.data });
-			else
-				node.warn("frame data is too long");
-		});
-		//TODO:support for extended frames, other cansend options
-	        this.on("close", function() {
-		    channel.stop();
-	        });
-	}
-    }
-    RED.nodes.registerType("cansend",CanSendNode);
+
+    RED.nodes.registerType("cansend", CanSendNode);
 }
